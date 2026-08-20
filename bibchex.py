@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import html
 import json
 import re
 import sys
@@ -26,6 +27,29 @@ LATEX_ACCENT_RE = re.compile(r"\\(?:['`\"^~=.]|[Hckrublvd])\s*\{?[A-Za-z]")
 ENTRY_START_RE = re.compile(r"(?m)^[^\S\r\n]*@([A-Za-z]+)\s*([({])")
 DOI_DIFFERENCE_CODES = {"doi-title-mismatch", "doi-author-mismatch", "doi-year-mismatch"}
 ANSI = {"error": "\033[31;1m", "warning": "\033[33;1m", "review": "\033[36m", "doi": "\033[35m", "reset": "\033[0m"}
+LATEX_CHAR_MAP = {
+    "Æ": r"{\AE}", "æ": r"{\ae}", "Œ": r"{\OE}", "œ": r"{\oe}",
+    "Ø": r"{\O}", "ø": r"{\o}", "Å": r"{\AA}", "å": r"{\aa}",
+    "Ł": r"{\L}", "ł": r"{\l}", "ß": r"{\ss}", "Ð": r"{\DH}",
+    "ð": r"{\dh}", "Þ": r"{\TH}", "þ": r"{\th}",
+    "’": "'", "‘": "`", "“": "``", "”": "''", "–": "--", "—": "---",
+    "−": "$-$", "×": r"$\times$", "±": r"$\pm$", "µ": r"$\mu$", "μ": r"$\mu$",
+    "α": r"$\alpha$", "β": r"$\beta$", "γ": r"$\gamma$", "δ": r"$\delta$",
+    "ε": r"$\epsilon$", "θ": r"$\theta$", "λ": r"$\lambda$", "π": r"$\pi$",
+    "σ": r"$\sigma$", "τ": r"$\tau$", "ω": r"$\omega$",
+    "≈": r"$\approx$", "≲": r"$\lesssim$", "≳": r"$\gtrsim$", "≫": r"$\gg$",
+    "≡": r"$\equiv$", "∝": r"$\propto$", "∼": r"$\sim$", "©": r"{\copyright}",
+}
+COMBINING_ACCENTS = {
+    "\u0300": "`", "\u0301": "'", "\u0302": "^", "\u0303": "~",
+    "\u0304": "=", "\u0306": "u", "\u0307": ".", "\u0308": '"',
+    "\u030a": "r", "\u030b": "H", "\u030c": "v", "\u0327": "c", "\u0328": "k",
+}
+SUBSCRIPT_MAP = str.maketrans("₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎", "0123456789+-=()")
+SUPERSCRIPT_MAP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾", "0123456789+-=()")
+SUBSCRIPT_CHARS = set("₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+SUPERSCRIPT_CHARS = set("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+HTML_FORMULA_RE = re.compile(r"<(?:/?(?:sub|sup)\b|/?(?:mml:)?math\b|(?:mml:)?(?:mi|mn|mo|mtext)\b)|&(?:#\d+|#x[0-9a-f]+|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|pi|sigma|tau|omega|minus|times|plusmn|le|ge|nbsp);", re.I)
 
 
 @dataclass
@@ -158,6 +182,102 @@ def unwrap(value: str) -> str:
     return value
 
 
+def latexify_unicode(value: str) -> tuple[str, int]:
+    """Convert supported Unicode text and formula glyphs to LaTeX."""
+    output: list[str] = []
+    changes = 0
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char in SUBSCRIPT_CHARS or char in SUPERSCRIPT_CHARS:
+            chars = SUBSCRIPT_CHARS if char in SUBSCRIPT_CHARS else SUPERSCRIPT_CHARS
+            end = index
+            while end < len(value) and value[end] in chars:
+                end += 1
+            run = value[index:end]
+            converted = run.translate(SUBSCRIPT_MAP if char in SUBSCRIPT_CHARS else SUPERSCRIPT_MAP)
+            output.append("$_{" + converted + "}$" if char in SUBSCRIPT_CHARS else "$^{" + converted + "}$")
+            changes += len(run)
+            index = end
+            continue
+        if char in LATEX_CHAR_MAP:
+            output.append(LATEX_CHAR_MAP[char])
+            changes += 1
+            index += 1
+            continue
+        decomposed = unicodedata.normalize("NFD", char)
+        if ord(char) > 127 and len(decomposed) >= 2 and decomposed[0].isascii() and all(mark in COMBINING_ACCENTS for mark in decomposed[1:]):
+            converted = decomposed[0]
+            for mark in decomposed[1:]:
+                converted = "{\\" + COMBINING_ACCENTS[mark] + converted + "}"
+            output.append(converted)
+            changes += 1
+        else:
+            output.append(char)
+        index += 1
+    return "".join(output), changes
+
+
+def latexify_html_formulae(value: str) -> tuple[str, int]:
+    """Convert supported HTML/MathML formula fragments to inline LaTeX."""
+    changes = 0
+
+    def math_replacement(match: re.Match[str]) -> str:
+        nonlocal changes
+        inner = re.sub(r"<[^>]+>", "", match.group(1))
+        decoded = html.unescape(inner)
+        converted, unicode_changes = latexify_unicode(decoded)
+        changes += 1 + unicode_changes
+        return "$" + converted.replace("$", "") + "$"
+
+    value = re.sub(r"<(?:mml:)?math\b[^>]*>(.*?)</(?:mml:)?math\s*>", math_replacement, value, flags=re.I | re.S)
+
+    def script_replacement(match: re.Match[str]) -> str:
+        nonlocal changes
+        kind, inner = match.group(1).lower(), match.group(2)
+        inner = re.sub(r"<[^>]+>", "", html.unescape(inner))
+        converted, unicode_changes = latexify_unicode(inner)
+        changes += 1 + unicode_changes
+        return ("$_{" if kind == "sub" else "$^{") + converted.replace("$", "") + "}$"
+
+    value = re.sub(r"<(sub|sup)\b[^>]*>(.*?)</\1\s*>", script_replacement, value, flags=re.I | re.S)
+
+    def entity_replacement(match: re.Match[str]) -> str:
+        nonlocal changes
+        decoded = html.unescape(match.group(0))
+        if decoded == match.group(0):
+            return match.group(0)
+        special = {"&": r"\&", "<": "$<$", ">": "$>$", "\u00a0": "~"}
+        if decoded in special:
+            converted = special[decoded]
+        else:
+            converted, _ = latexify_unicode(decoded)
+        changes += 1
+        return converted
+
+    value = re.sub(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);", entity_replacement, value, flags=re.I)
+    return value, changes
+
+
+def latexify_entry_fields(text: str) -> tuple[str, int, int]:
+    """Latexify field values while preserving entry headers and formatting."""
+    entries, _ = parse(text)
+    replacements: list[tuple[int, int, str, int, int]] = []
+    for entry in entries:
+        for field in entry.fields:
+            html_converted, html_changes = latexify_html_formulae(field.value)
+            converted, unicode_changes = latexify_unicode(html_converted)
+            if html_changes or unicode_changes:
+                value_start = field.start + text[field.start:field.end].find(field.value)
+                replacements.append((value_start, value_start + len(field.value), converted, unicode_changes, html_changes))
+    unicode_total = html_total = 0
+    for start, end, converted, unicode_changes, html_changes in sorted(replacements, reverse=True):
+        text = text[:start] + converted + text[end:]
+        unicode_total += unicode_changes
+        html_total += html_changes
+    return text, unicode_total, html_total
+
+
 def normalize_doi(value: str) -> str:
     value = unwrap(value).strip()
     value = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", value, flags=re.I)
@@ -198,6 +318,7 @@ def inspect_entries(
     timeout: float,
     ignored_character_fields: set[str] | None = None,
     report_latex_accents: bool = False,
+    latexify_supported_unicode: bool = False,
 ) -> list[Issue]:
     issues: list[Issue] = []
     ignored_character_fields = {name.lower() for name in (ignored_character_fields or set())}
@@ -218,8 +339,15 @@ def inspect_entries(
             value = unwrap(field.value)
             if not (field.value.strip().startswith(("{", '"')) or re.fullmatch(r"\d+|[A-Za-z][\w:-]*", field.value.strip())):
                 issues.append(Issue("warning", "unusual-value-format", "Value is not braced, quoted, numeric, or a simple macro.", entry.key, field.name, field.line))
-            if lname not in ignored_character_fields and any(ord(ch) > 127 for ch in value):
-                chars = " ".join(sorted({f"{ch!r} (U+{ord(ch):04X})" for ch in value if ord(ch) > 127}))
+            review_value = value
+            if latexify_supported_unicode:
+                review_value = latexify_html_formulae(review_value)[0]
+                review_value = latexify_unicode(review_value)[0]
+            if HTML_FORMULA_RE.search(review_value):
+                issues.append(Issue("review", "html-formula-markup", "Contains HTML/MathML formula markup; use --latexify-unicode to convert supported forms.", entry.key, field.name, field.line))
+            character_check_value = review_value
+            if lname not in ignored_character_fields and any(ord(ch) > 127 for ch in character_check_value):
+                chars = " ".join(sorted({f"{ch!r} (U+{ord(ch):04X})" for ch in character_check_value if ord(ch) > 127}))
                 issues.append(Issue("review", "non-ascii-unicode", f"Contains Unicode character(s): {chars}", entry.key, field.name, field.line))
             if report_latex_accents and LATEX_ACCENT_RE.search(value):
                 issues.append(Issue("review", "latex-accent", "Contains a LaTeX accent command; verify encoding and spelling.", entry.key, field.name, field.line))
@@ -365,6 +493,11 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="terminal color mode (default: auto)",
     )
+    parser.add_argument(
+        "--latexify-unicode",
+        action="store_true",
+        help="convert supported Unicode accents, symbols, and formula scripts to LaTeX",
+    )
     args = parser.parse_args(argv)
     output = args.output or args.input.with_suffix(".cleaned.bib")
     report_path = args.report
@@ -395,14 +528,19 @@ def main(argv: list[str] | None = None) -> int:
             args.timeout,
             ignored_character_fields=fields_to_remove,
             report_latex_accents=args.report_latex_accents,
+            latexify_supported_unicode=args.latexify_unicode,
         )
     )
     issues.sort(key=issue_sort_key)
     cleaned, removed_fields = remove_fields(text, entries, fields_to_remove)
     cleaned, trailing_commas_removed = remove_trailing_entry_commas(cleaned)
+    unicode_characters_converted = 0
+    html_formulae_converted = 0
+    if args.latexify_unicode:
+        cleaned, unicode_characters_converted, html_formulae_converted = latexify_entry_fields(cleaned)
     if not args.review_only:
         output.write_text(cleaned, encoding="utf-8")
-    report = {"input": str(args.input), "output": None if args.review_only else str(output), "entries": len(entries), "fields_removed": removed_fields, "local_url_fields_removed": removed_fields.get("local-url", 0), "trailing_entry_commas_removed": trailing_commas_removed, "online_doi_checks": not args.offline, "issues": [asdict(i) for i in issues]}
+    report = {"input": str(args.input), "output": None if args.review_only else str(output), "entries": len(entries), "fields_removed": removed_fields, "local_url_fields_removed": removed_fields.get("local-url", 0), "trailing_entry_commas_removed": trailing_commas_removed, "unicode_characters_converted": unicode_characters_converted, "html_formulae_converted": html_formulae_converted, "online_doi_checks": not args.offline, "issues": [asdict(i) for i in issues]}
     if report_path is not None:
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     use_color = args.color == "always" or (args.color == "auto" and sys.stdout.isatty())
@@ -410,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
         print(format_issue(issue, args.input, use_color))
     removal_summary = ", ".join(f"{count} {name}" for name, count in removed_fields.items())
     print(f"Checked {len(entries)} entries; removed {removal_summary} field(s) and {trailing_commas_removed} trailing comma(s); {len(issues)} issue(s).")
+    if args.latexify_unicode:
+        print(f"Converted {unicode_characters_converted} supported Unicode character(s) to LaTeX.")
+        print(f"Converted {html_formulae_converted} supported HTML/MathML formula fragment(s) to LaTeX.")
     if report_path is not None:
         print(f"Report: {report_path}")
     return 1 if any(i.severity == "error" for i in issues) else 0

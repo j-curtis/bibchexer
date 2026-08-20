@@ -169,6 +169,58 @@ class FormatterTests(unittest.TestCase):
         issue = next(issue for issue in issues if issue.code == "doi-not-verified")
         self.assertEqual(issue.severity, "error")
 
+    def test_latexifies_accents_and_chemical_formula_scripts(self):
+        value = "café, Ångström, H₂O, Fe³⁺, α–β"
+        converted, changes = bf.latexify_unicode(value)
+        self.assertEqual(
+            converted,
+            r"caf{\'e}, {\AA}ngstr{\"o}m, H$_{2}$O, Fe$^{3+}$, $\alpha$--$\beta$",
+        )
+        self.assertEqual(changes, 9)
+
+    def test_latexify_mode_reports_only_unsupported_unicode(self):
+        source = '''@article{x,
+  title = {Café H₂O ☃},
+  doi = {10.1234/example}
+}
+'''
+        entries, _ = bf.parse(source)
+        issues = bf.inspect_entries(source, entries, False, 1, latexify_supported_unicode=True)
+        unicode_issue = next(issue for issue in issues if issue.code == "non-ascii-unicode")
+        self.assertEqual(unicode_issue.message, "Contains Unicode character(s): '☃' (U+2603)")
+
+    def test_latexification_preserves_entry_type_and_existing_latex(self):
+        source = '''@misc{x,
+  title = {{Café and H₂O with {\\'e}}},
+  doi = {10.1234/example}
+}
+'''
+        converted, changes, html_changes = bf.latexify_entry_fields(source)
+        entries, issues = bf.parse(converted)
+        self.assertFalse(issues)
+        self.assertEqual(entries[0].kind.lower(), "misc")
+        self.assertIn(r"{{Caf{\'e} and H$_{2}$O with {\'e}}}", converted)
+        self.assertEqual(changes, 2)
+        self.assertEqual(html_changes, 0)
+
+    def test_identifies_and_converts_html_formulae(self):
+        value = "H<sub>2</sub>O, Fe<sup>3+</sup>, &alpha; and <mml:math><mml:mi>d</mml:mi><mml:mo>=</mml:mo><mml:mn>2</mml:mn></mml:math>"
+        converted, changes = bf.latexify_html_formulae(value)
+        self.assertEqual(converted, r"H$_{2}$O, Fe$^{3+}$, $\alpha$ and $d=2$")
+        self.assertEqual(changes, 4)
+
+    def test_html_formulae_are_reviewed_unless_conversion_is_enabled(self):
+        source = '''@article{x,
+  title = {Water H<sub>2</sub>O},
+  doi = {10.1234/example}
+}
+'''
+        entries, _ = bf.parse(source)
+        normal = bf.inspect_entries(source, entries, False, 1)
+        converted = bf.inspect_entries(source, entries, False, 1, latexify_supported_unicode=True)
+        self.assertIn("html-formula-markup", {issue.code for issue in normal})
+        self.assertNotIn("html-formula-markup", {issue.code for issue in converted})
+
     def test_malformed_field_is_reported(self):
         _, issues = bf.parse("@article{x,\n title {broken},\n}\n")
         self.assertIn("malformed-field", {i.code for i in issues})

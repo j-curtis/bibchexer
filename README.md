@@ -45,6 +45,9 @@ python3 bibchex.py references.bib --report-latex-accents
 python3 bibchex.py references.bib --color always
 python3 bibchex.py references.bib --color never
 
+# Convert supported Unicode accents, symbols, and formula scripts to LaTeX
+python3 bibchex.py references.bib --latexify-unicode
+
 # Select output and report paths
 python3 bibchex.py references.bib -o cleaned.bib --report report.json
 
@@ -63,6 +66,15 @@ Non-ASCII checks ignore fields scheduled for removal. Consequently, abstract
 and keywords characters are checked only when `--keep-abstract-keywords` is
 used. LaTeX accent-command reviews are suppressed unless
 `--report-latex-accents` is supplied.
+
+`--latexify-unicode` is opt-in. It converts accented Latin letters, common
+typographic/scientific symbols, and Unicode formula scripts (for example,
+`H₂O` to `H$_{2}$O` and `Fe³⁺` to `Fe$^{3+}$`). It does not guess that plain
+digits in text such as `H2O` are chemical subscripts.
+The same option converts supported HTML formula forms such as `H<sub>2</sub>O`,
+`Fe<sup>3+</sup>`, common entities such as `&alpha;`, and simple `<math>` or
+`<mml:math>` fragments. Recognized markup is reported as
+`html-formula-markup` when conversion is not enabled.
 
 Issues in both terminal and JSON reports are ordered as errors, warnings,
 general review items, and finally differences from current DOI metadata.
