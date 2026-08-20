@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+# Formatter output
+*.cleaned.bib
+*.report.json
+
+# Local environments and editor files
+.venv/
+.DS_Store
