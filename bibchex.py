@@ -507,16 +507,17 @@ def inspect_entries(
             metadata, error = fetch_doi(doi, timeout)
         if error:
             if is_arxiv_doi(doi):
-                issues.append(
-                    Issue(
-                        "review",
-                        "arxiv-doi-not-verified",
-                        f"arXiv DOI could not be verified through Crossref (it may be registered through DataCite): {error}",
-                        entry.key,
-                        doi_field.name,
-                        doi_field.line,
+                if entry.kind.lower() != "misc":
+                    issues.append(
+                        Issue(
+                            "review",
+                            "arxiv-doi-not-verified",
+                            f"arXiv DOI could not be verified through Crossref (it may be registered through DataCite): {error}",
+                            entry.key,
+                            doi_field.name,
+                            doi_field.line,
+                        )
                     )
-                )
             else:
                 issues.append(Issue("error", "doi-not-verified", f"DOI could not be resolved through Crossref: {error}", entry.key, doi_field.name, doi_field.line))
             continue
@@ -718,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
         text, added_fields, doi_results = enrich_articles_from_doi(text, entries, args.timeout)
         entries, enrichment_parse_issues = parse(text)
         issues.extend(enrichment_parse_issues)
-    fields_to_remove = {"local-url"}
+    fields_to_remove = {"file", "local-url"}
     if not args.keep_abstract_keywords:
         fields_to_remove.update({"abstract", "keywords"})
     article_fields_to_remove = {

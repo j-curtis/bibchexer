@@ -1,7 +1,8 @@
 # Conservative BibTeX formatter
 
-This command-line tool always removes `local-url` fields. By default it also
-removes `abstract` and `keywords` fields. For `@article` entries, the cleaned
+This command-line tool always removes `local-url` and `file` fields from every
+entry. By default it also removes `abstract` and `keywords` fields. For
+`@article` entries, the cleaned
 output retains only `title`, `author`, `year`, `journal`, `volume`, `pages`,
 `doi`, `number`, `eprint`, `archiveprefix`, `primaryclass`, `eprinttype`, and
 `eprintclass`. Field names are matched case-insensitively. It then removes any
@@ -106,9 +107,11 @@ general review items, and finally differences from current DOI metadata.
 Terminal colors are enabled automatically when output is connected to an
 interactive terminal; redirected output remains plain text.
 
-An unverified DOI in arXiv's `10.48550/arXiv.*` namespace is reported as
+Except on `@misc` entries, an unverified DOI in arXiv's
+`10.48550/arXiv.*` namespace is reported as
 `REVIEW arxiv-doi-not-verified`, not as an error, because these DOIs are
-typically registered through DataCite and may be absent from Crossref.
+typically registered through DataCite and may be absent from Crossref. The
+notice is suppressed for `@misc`, the usual entry type for arXiv preprints.
 
 ## Test
 

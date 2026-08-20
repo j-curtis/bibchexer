@@ -296,8 +296,8 @@ class FormatterTests(unittest.TestCase):
         )
         self.assertTrue(all(issue.severity == "error" for issue in mismatches.values()))
 
-    def test_unverified_arxiv_doi_is_review_not_error(self):
-        source = '''@misc{preprint,
+    def test_unverified_arxiv_doi_is_review_not_error_for_non_misc_entries(self):
+        source = '''@article{preprint,
   title = {A Preprint},
   doi = {10.48550/arXiv.2401.12345}
 }
@@ -308,6 +308,35 @@ class FormatterTests(unittest.TestCase):
         arxiv_issue = next(issue for issue in issues if issue.code == "arxiv-doi-not-verified")
         self.assertEqual(arxiv_issue.severity, "review")
         self.assertNotIn("doi-not-verified", {issue.code for issue in issues})
+
+    def test_unverified_arxiv_doi_is_suppressed_for_misc_entries(self):
+        source = '''@misc{preprint,
+  title = {A Preprint},
+  doi = {10.48550/arXiv.2401.12345}
+}
+'''
+        entries, _ = bf.parse(source)
+        with patch("bibchex.fetch_doi", return_value=(None, "HTTP 404")):
+            issues = bf.inspect_entries(source, entries, True, 1)
+        self.assertNotIn("arxiv-doi-not-verified", {issue.code for issue in issues})
+        self.assertNotIn("doi-not-verified", {issue.code for issue in issues})
+
+    def test_file_and_local_url_are_removed_from_every_entry_type(self):
+        source = '''@misc{misc,
+  title = {A Preprint},
+  file = {/private/preprint.pdf},
+  local-url = {file:///private/preprint.pdf}
+}
+@book{book,
+  title = {A Book},
+  FILE = {/private/book.pdf},
+  LOCAL-URL = {file:///private/book.pdf}
+}
+'''
+        entries, _ = bf.parse(source)
+        cleaned, counts = bf.remove_fields_by_policy(source, entries, {"file", "local-url"})
+        self.assertEqual(counts, {"file": 2, "local-url": 2})
+        self.assertNotRegex(cleaned.lower(), r"\b(?:file|local-url)\s*=")
 
     def test_unverified_non_arxiv_doi_remains_error(self):
         source = '''@article{paper,
