@@ -18,7 +18,7 @@ Checks include:
 Python 3.9 or newer is sufficient; no packages need to be installed.
 
 ```sh
-python3 bibtex_formatter.py references.bib
+python3 bibchex.py references.bib
 ```
 
 This creates `references.cleaned.bib`. The exit status is `1` when the results
@@ -30,26 +30,26 @@ Useful options:
 
 ```sh
 # Review without writing cleaned BibTeX
-python3 bibtex_formatter.py references.bib --review-only
+python3 bibchex.py references.bib --review-only
 
 # Skip network calls while testing or working offline
-python3 bibtex_formatter.py references.bib --offline
+python3 bibchex.py references.bib --offline
 
 # Keep abstract and keywords fields (local-url is still removed)
-python3 bibtex_formatter.py references.bib --keep-abstract-keywords
+python3 bibchex.py references.bib --keep-abstract-keywords
 
 # Include LaTeX accent commands in the review report
-python3 bibtex_formatter.py references.bib --report-latex-accents
+python3 bibchex.py references.bib --report-latex-accents
 
 # Force or disable colored terminal output
-python3 bibtex_formatter.py references.bib --color always
-python3 bibtex_formatter.py references.bib --color never
+python3 bibchex.py references.bib --color always
+python3 bibchex.py references.bib --color never
 
 # Select output and report paths
-python3 bibtex_formatter.py references.bib -o cleaned.bib --report report.json
+python3 bibchex.py references.bib -o cleaned.bib --report report.json
 
 # Explicitly save the terminal findings as structured JSON
-python3 bibtex_formatter.py references.bib --report references.report.json
+python3 bibchex.py references.bib --report references.report.json
 ```
 
 The original file is never overwritten unless that exact path is explicitly

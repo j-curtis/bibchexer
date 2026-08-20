@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import bibtex_formatter as bf
+import bibchex as bf
 
 
 SAMPLE = '''@article{smith2020,
@@ -151,7 +151,7 @@ class FormatterTests(unittest.TestCase):
 }
 '''
         entries, _ = bf.parse(source)
-        with patch("bibtex_formatter.fetch_doi", return_value=(None, "HTTP 404")):
+        with patch("bibchex.fetch_doi", return_value=(None, "HTTP 404")):
             issues = bf.inspect_entries(source, entries, True, 1)
         arxiv_issue = next(issue for issue in issues if issue.code == "arxiv-doi-not-verified")
         self.assertEqual(arxiv_issue.severity, "review")
@@ -164,7 +164,7 @@ class FormatterTests(unittest.TestCase):
 }
 '''
         entries, _ = bf.parse(source)
-        with patch("bibtex_formatter.fetch_doi", return_value=(None, "HTTP 404")):
+        with patch("bibchex.fetch_doi", return_value=(None, "HTTP 404")):
             issues = bf.inspect_entries(source, entries, True, 1)
         issue = next(issue for issue in issues if issue.code == "doi-not-verified")
         self.assertEqual(issue.severity, "error")
