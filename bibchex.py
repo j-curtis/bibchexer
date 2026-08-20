@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Conservative BibTeX cleaner and validator.
-
-The only automatic edit is removal of ``local-url`` fields.  Everything else
-is reported for human review.
-"""
+"""BibTeX cleaner and validator with a compact default article schema."""
 
 from __future__ import annotations
 
@@ -23,9 +19,27 @@ from typing import Any
 
 
 DOI_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Z0-9]+$", re.I)
+ARTICLE_REQUIRED_FIELDS = ("title", "author", "year", "journal", "volume", "pages")
+ARTICLE_ALLOWED_FIELDS = set(ARTICLE_REQUIRED_FIELDS) | {
+    "doi",
+    "number",
+    "eprint",
+    "archiveprefix",
+    "primaryclass",
+    "eprinttype",
+    "eprintclass",
+}
 LATEX_ACCENT_RE = re.compile(r"\\(?:['`\"^~=.]|[Hckrublvd])\s*\{?[A-Za-z]")
 ENTRY_START_RE = re.compile(r"(?m)^[^\S\r\n]*@([A-Za-z]+)\s*([({])")
-DOI_DIFFERENCE_CODES = {"doi-title-mismatch", "doi-author-mismatch", "doi-year-mismatch"}
+DOI_DIFFERENCE_CODES = {
+    "doi-title-mismatch",
+    "doi-author-mismatch",
+    "doi-year-mismatch",
+    "doi-journal-mismatch",
+    "doi-volume-mismatch",
+    "doi-pages-mismatch",
+    "doi-number-mismatch",
+}
 ANSI = {"error": "\033[31;1m", "warning": "\033[33;1m", "review": "\033[36m", "doi": "\033[35m", "reset": "\033[0m"}
 LATEX_CHAR_MAP = {
     "Æ": r"{\AE}", "æ": r"{\ae}", "Œ": r"{\OE}", "œ": r"{\oe}",
@@ -33,6 +47,7 @@ LATEX_CHAR_MAP = {
     "Ł": r"{\L}", "ł": r"{\l}", "ß": r"{\ss}", "Ð": r"{\DH}",
     "ð": r"{\dh}", "Þ": r"{\TH}", "þ": r"{\th}",
     "’": "'", "‘": "`", "“": "``", "”": "''", "–": "--", "—": "---",
+    "\u2009": " ", "\u202f": " ", "\u00a0": " ",
     "−": "$-$", "×": r"$\times$", "±": r"$\pm$", "µ": r"$\mu$", "μ": r"$\mu$",
     "α": r"$\alpha$", "β": r"$\beta$", "γ": r"$\gamma$", "δ": r"$\delta$",
     "ε": r"$\epsilon$", "θ": r"$\theta$", "λ": r"$\lambda$", "π": r"$\pi$",
@@ -299,6 +314,14 @@ def similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, norm_words(a), norm_words(b)).ratio()
 
 
+def unicode_character_description(char: str) -> str:
+    """Describe a non-ASCII character even when its glyph is invisible."""
+    codepoint = f"U+{ord(char):04X}"
+    name = unicodedata.name(char, "UNKNOWN CHARACTER")
+    escaped = char.encode("unicode_escape").decode("ascii")
+    return f"'{escaped}' ({codepoint} {name})"
+
+
 def fetch_doi(doi: str, timeout: float) -> tuple[dict[str, Any] | None, str | None]:
     url = "https://api.crossref.org/works/" + urllib.parse.quote(doi, safe="")
     req = urllib.request.Request(url, headers={"User-Agent": "bibtex-conservative-checker/1.0 (mailto:unknown@example.invalid)"})
@@ -311,6 +334,109 @@ def fetch_doi(doi: str, timeout: float) -> tuple[dict[str, Any] | None, str | No
         return None, str(exc)
 
 
+def crossref_year(metadata: dict[str, Any]) -> str:
+    for date_name in ("published-print", "published-online", "issued"):
+        parts = metadata.get(date_name, {}).get("date-parts", [])
+        if parts and parts[0]:
+            return str(parts[0][0])
+    return ""
+
+
+def crossref_authors(metadata: dict[str, Any]) -> str:
+    authors = []
+    for author in metadata.get("author", []):
+        family = str(author.get("family", "")).strip()
+        given = str(author.get("given", "")).strip()
+        name = ", ".join(part for part in (family, given) if part)
+        if name:
+            authors.append(name)
+    return " and ".join(authors)
+
+
+def crossref_pages(metadata: dict[str, Any]) -> str:
+    """Return a page range or electronic article locator suitable for BibTeX."""
+    page = str(metadata.get("page", "")).strip()
+    if page:
+        return page
+    article_number = str(metadata.get("article-number", "")).strip()
+    if article_number:
+        return article_number
+    doi = str(metadata.get("DOI", "")).strip()
+    if doi.lower().startswith("10.1103/"):
+        locator = doi.rsplit(".", 1)[-1]
+        if locator != doi and re.fullmatch(r"[A-Za-z]?\d+", locator):
+            return locator
+    return ""
+
+
+def crossref_article_fields(metadata: dict[str, Any]) -> dict[str, str]:
+    """Map Crossref work metadata to fields useful for an article entry."""
+    mapping = {
+        "title": " ".join(metadata.get("title", [])).strip(),
+        "author": crossref_authors(metadata),
+        "year": crossref_year(metadata),
+        "journal": " ".join(metadata.get("container-title", [])).strip(),
+        "volume": str(metadata.get("volume", "")).strip(),
+        "pages": crossref_pages(metadata),
+        "number": str(metadata.get("issue", "")).strip(),
+    }
+    return {name: value for name, value in mapping.items() if value}
+
+
+def enrich_articles_from_doi(
+    text: str,
+    entries: list[Entry],
+    timeout: float,
+) -> tuple[str, dict[str, int], dict[str, tuple[dict[str, Any] | None, str | None]]]:
+    """Fill missing article fields from resolvable DOI metadata."""
+    changes: list[tuple[int, int, str]] = []
+    added_counts: dict[str, int] = {}
+    doi_results: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
+    for entry in entries:
+        if entry.kind.lower() != "article":
+            continue
+        fields_by_name = {field.name.lower(): field for field in entry.fields}
+        values = {name: unwrap(field.value).strip() for name, field in fields_by_name.items()}
+        doi = normalize_doi(values.get("doi", ""))
+        if not DOI_RE.fullmatch(doi):
+            continue
+        if doi not in doi_results:
+            doi_results[doi] = fetch_doi(doi, timeout)
+        metadata, error = doi_results[doi]
+        if error or metadata is None:
+            continue
+        remote_fields = crossref_article_fields(metadata)
+        missing = [
+            name
+            for name in (*ARTICLE_REQUIRED_FIELDS, "number")
+            if not values.get(name) and remote_fields.get(name)
+        ]
+        if not missing:
+            continue
+        absent = []
+        for name in missing:
+            field = fields_by_name.get(name)
+            if field is None:
+                absent.append(name)
+                continue
+            value_offset = text[field.start:field.end].find(field.value)
+            value_start = field.start + value_offset
+            changes.append((value_start, value_start + len(field.value), "{" + remote_fields[name] + "}"))
+        if absent:
+            closing = entry.end - 1
+            insertion = closing - 1
+            while insertion > entry.start and text[insertion].isspace():
+                insertion -= 1
+            prefix = "" if text[insertion] == "," else ","
+            rendered = prefix + "".join(f"\n  {name} = {{{remote_fields[name]}}}," for name in absent)
+            changes.append((insertion + 1, insertion + 1, rendered))
+        for name in missing:
+            added_counts[name] = added_counts.get(name, 0) + 1
+    for start, end, rendered in sorted(changes, reverse=True):
+        text = text[:start] + rendered + text[end:]
+    return text, added_counts, doi_results
+
+
 def inspect_entries(
     text: str,
     entries: list[Entry],
@@ -319,6 +445,7 @@ def inspect_entries(
     ignored_character_fields: set[str] | None = None,
     report_latex_accents: bool = False,
     latexify_supported_unicode: bool = False,
+    doi_results: dict[str, tuple[dict[str, Any] | None, str | None]] | None = None,
 ) -> list[Issue]:
     issues: list[Issue] = []
     ignored_character_fields = {name.lower() for name in (ignored_character_fields or set())}
@@ -347,10 +474,23 @@ def inspect_entries(
                 issues.append(Issue("review", "html-formula-markup", "Contains HTML/MathML formula markup; use --latexify-unicode to convert supported forms.", entry.key, field.name, field.line))
             character_check_value = review_value
             if lname not in ignored_character_fields and any(ord(ch) > 127 for ch in character_check_value):
-                chars = " ".join(sorted({f"{ch!r} (U+{ord(ch):04X})" for ch in character_check_value if ord(ch) > 127}))
+                chars = " ".join(sorted({unicode_character_description(ch) for ch in character_check_value if ord(ch) > 127}))
                 issues.append(Issue("review", "non-ascii-unicode", f"Contains Unicode character(s): {chars}", entry.key, field.name, field.line))
             if report_latex_accents and LATEX_ACCENT_RE.search(value):
                 issues.append(Issue("review", "latex-accent", "Contains a LaTeX accent command; verify encoding and spelling.", entry.key, field.name, field.line))
+        if entry.kind.lower() == "article":
+            for required_field in ARTICLE_REQUIRED_FIELDS:
+                if not values.get(required_field, "").strip():
+                    issues.append(
+                        Issue(
+                            "error",
+                            "missing-required-field",
+                            f"@article entry is missing required field {required_field!r}.",
+                            entry.key,
+                            required_field,
+                            entry.line,
+                        )
+                    )
         doi_field = next((f for f in entry.fields if f.name.lower() == "doi"), None)
         if not doi_field:
             issues.append(Issue("review", "missing-doi", "No DOI field; confirm whether this work has a DOI.", entry.key, "doi", entry.line))
@@ -361,7 +501,10 @@ def inspect_entries(
             continue
         if not online:
             continue
-        metadata, error = fetch_doi(doi, timeout)
+        if doi_results is not None and doi in doi_results:
+            metadata, error = doi_results[doi]
+        else:
+            metadata, error = fetch_doi(doi, timeout)
         if error:
             if is_arxiv_doi(doi):
                 issues.append(
@@ -377,18 +520,40 @@ def inspect_entries(
             else:
                 issues.append(Issue("error", "doi-not-verified", f"DOI could not be resolved through Crossref: {error}", entry.key, doi_field.name, doi_field.line))
             continue
-        remote_title = " ".join(metadata.get("title", []))
+        remote_fields = crossref_article_fields(metadata)
+        difference_severity = "error" if entry.kind.lower() == "article" else "review"
+        remote_title = remote_fields.get("title", "")
         if values.get("title") and remote_title and similar(values["title"], remote_title) < 0.72:
-            issues.append(Issue("review", "doi-title-mismatch", f"DOI title differs (Crossref: {remote_title!r}).", entry.key, "title", entry.line))
-        remote_year = None
-        for date_name in ("published-print", "published-online", "issued"):
-            parts = metadata.get(date_name, {}).get("date-parts", [])
-            if parts and parts[0]: remote_year = str(parts[0][0]); break
+            issues.append(Issue(difference_severity, "doi-title-mismatch", f"DOI title differs (Crossref: {remote_title!r}).", entry.key, "title", entry.line))
+        remote_year = remote_fields.get("year", "")
         if values.get("year") and remote_year and values["year"] != remote_year:
-            issues.append(Issue("review", "doi-year-mismatch", f"Year differs (BibTeX {values['year']!r}, Crossref {remote_year!r}).", entry.key, "year", entry.line))
-        remote_authors = " and ".join(" ".join(filter(None, (a.get("given"), a.get("family")))) for a in metadata.get("author", []))
+            issues.append(Issue(difference_severity, "doi-year-mismatch", f"Year differs (BibTeX {values['year']!r}, Crossref {remote_year!r}).", entry.key, "year", entry.line))
+        remote_authors = remote_fields.get("author", "")
         if values.get("author") and remote_authors and similar(values["author"], remote_authors) < 0.55:
-            issues.append(Issue("review", "doi-author-mismatch", f"Authors differ (Crossref: {remote_authors!r}).", entry.key, "author", entry.line))
+            issues.append(Issue(difference_severity, "doi-author-mismatch", f"Authors differ (Crossref: {remote_authors!r}).", entry.key, "author", entry.line))
+        comparison_rules = {} if entry.kind.lower() != "article" else {
+            "journal": ("doi-journal-mismatch", 0.72),
+            "volume": ("doi-volume-mismatch", 1.0),
+            "pages": ("doi-pages-mismatch", 1.0),
+            "number": ("doi-number-mismatch", 1.0),
+        }
+        for field_name, (code, threshold) in comparison_rules.items():
+            local_value = values.get(field_name, "")
+            remote_value = remote_fields.get(field_name, "")
+            if not local_value or not remote_value:
+                continue
+            matches = similar(local_value, remote_value) >= threshold if threshold < 1 else norm_words(local_value) == norm_words(remote_value)
+            if not matches:
+                issues.append(
+                    Issue(
+                        "error",
+                        code,
+                        f"{field_name.capitalize()} differs (BibTeX {local_value!r}, Crossref {remote_value!r}).",
+                        entry.key,
+                        field_name,
+                        entry.line,
+                    )
+                )
     return issues
 
 
@@ -406,6 +571,31 @@ def remove_fields(text: str, entries: list[Entry], field_names: set[str]) -> tup
         if start < len(text) and text[start:end].startswith("\n"):
             pass
         text = text[:start] + text[end:]
+    return text, counts
+
+
+def remove_fields_by_policy(
+    text: str,
+    entries: list[Entry],
+    field_names: set[str],
+    strip_article_fields: bool = True,
+) -> tuple[str, dict[str, int]]:
+    """Remove global fields and, by default, fields outside the article allowlist."""
+    globally_removed = {name.lower() for name in field_names}
+    selected: list[Field] = []
+    for entry in entries:
+        restrict_entry = strip_article_fields and entry.kind.lower() == "article"
+        for field in entry.fields:
+            name = field.name.lower()
+            if name in globally_removed or (restrict_entry and name not in ARTICLE_ALLOWED_FIELDS):
+                selected.append(field)
+
+    counts = {name: 0 for name in sorted(globally_removed)}
+    for field in selected:
+        name = field.name.lower()
+        counts[name] = counts.get(name, 0) + 1
+    for field in sorted(selected, key=lambda item: item.start, reverse=True):
+        text = text[:field.start] + text[field.end:]
     return text, counts
 
 
@@ -483,6 +673,11 @@ def main(argv: list[str] | None = None) -> int:
         help="preserve abstract and keywords fields (they are removed by default)",
     )
     parser.add_argument(
+        "--keep-all-article-fields",
+        action="store_true",
+        help="disable the default @article field allowlist",
+    )
+    parser.add_argument(
         "--report-latex-accents",
         action="store_true",
         help="report LaTeX accent commands for human review (suppressed by default)",
@@ -517,22 +712,42 @@ def main(argv: list[str] | None = None) -> int:
     entries, issues = parse(text)
     if not entries:
         issues.append(Issue("error", "no-entries", "No BibTeX entries were found."))
+    added_fields: dict[str, int] = {}
+    doi_results: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
+    if not args.offline:
+        text, added_fields, doi_results = enrich_articles_from_doi(text, entries, args.timeout)
+        entries, enrichment_parse_issues = parse(text)
+        issues.extend(enrichment_parse_issues)
     fields_to_remove = {"local-url"}
     if not args.keep_abstract_keywords:
         fields_to_remove.update({"abstract", "keywords"})
+    article_fields_to_remove = {
+        field.name.lower()
+        for entry in entries
+        if entry.kind.lower() == "article"
+        for field in entry.fields
+        if field.name.lower() not in ARTICLE_ALLOWED_FIELDS
+    }
+    ignored_character_fields = fields_to_remove | (set() if args.keep_all_article_fields else article_fields_to_remove)
     issues.extend(
         inspect_entries(
             text,
             entries,
             not args.offline,
             args.timeout,
-            ignored_character_fields=fields_to_remove,
+            ignored_character_fields=ignored_character_fields,
             report_latex_accents=args.report_latex_accents,
             latexify_supported_unicode=args.latexify_unicode,
+            doi_results=doi_results,
         )
     )
     issues.sort(key=issue_sort_key)
-    cleaned, removed_fields = remove_fields(text, entries, fields_to_remove)
+    cleaned, removed_fields = remove_fields_by_policy(
+        text,
+        entries,
+        fields_to_remove,
+        strip_article_fields=not args.keep_all_article_fields,
+    )
     cleaned, trailing_commas_removed = remove_trailing_entry_commas(cleaned)
     unicode_characters_converted = 0
     html_formulae_converted = 0
@@ -540,14 +755,15 @@ def main(argv: list[str] | None = None) -> int:
         cleaned, unicode_characters_converted, html_formulae_converted = latexify_entry_fields(cleaned)
     if not args.review_only:
         output.write_text(cleaned, encoding="utf-8")
-    report = {"input": str(args.input), "output": None if args.review_only else str(output), "entries": len(entries), "fields_removed": removed_fields, "local_url_fields_removed": removed_fields.get("local-url", 0), "trailing_entry_commas_removed": trailing_commas_removed, "unicode_characters_converted": unicode_characters_converted, "html_formulae_converted": html_formulae_converted, "online_doi_checks": not args.offline, "issues": [asdict(i) for i in issues]}
+    report = {"input": str(args.input), "output": None if args.review_only else str(output), "entries": len(entries), "fields_added_from_doi": added_fields, "fields_removed": removed_fields, "local_url_fields_removed": removed_fields.get("local-url", 0), "trailing_entry_commas_removed": trailing_commas_removed, "unicode_characters_converted": unicode_characters_converted, "html_formulae_converted": html_formulae_converted, "online_doi_checks": not args.offline, "issues": [asdict(i) for i in issues]}
     if report_path is not None:
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     use_color = args.color == "always" or (args.color == "auto" and sys.stdout.isatty())
     for issue in issues:
         print(format_issue(issue, args.input, use_color))
     removal_summary = ", ".join(f"{count} {name}" for name, count in removed_fields.items())
-    print(f"Checked {len(entries)} entries; removed {removal_summary} field(s) and {trailing_commas_removed} trailing comma(s); {len(issues)} issue(s).")
+    addition_summary = ", ".join(f"{count} {name}" for name, count in sorted(added_fields.items())) or "0"
+    print(f"Checked {len(entries)} entries; added {addition_summary} field(s) from DOI metadata; removed {removal_summary} field(s) and {trailing_commas_removed} trailing comma(s); {len(issues)} issue(s).")
     if args.latexify_unicode:
         print(f"Converted {unicode_characters_converted} supported Unicode character(s) to LaTeX.")
         print(f"Converted {html_formulae_converted} supported HTML/MathML formula fragment(s) to LaTeX.")
